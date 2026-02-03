@@ -1,0 +1,24 @@
+{
+  "Brokerage": {
+    "positions": {
+      "VOO": {
+        "price": 639.6799926757812,
+        "shares": 10.882
+      }
+    },
+    "timestamp": "2026-02-03T03:11:07.002902Z"
+  },
+  "Robinhood": {
+    "positions": {
+      "ETH-USD": {
+        "price": 2289.60595703125,
+        "shares": 5.193944
+      }
+    },
+    "timestamp": "2026-02-03T03:11:06.401921Z"
+  },
+  "Test": {
+    "balance": 626.14,
+    "timestamp": "2026-02-03T02:39:04.440520Z"
+  }
+}
