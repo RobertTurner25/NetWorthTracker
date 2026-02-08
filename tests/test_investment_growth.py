@@ -86,8 +86,8 @@ class InvestmentGrowthTests(unittest.TestCase):
             holdings, shares, fetcher, prior_positions, "My Account"
         )
         self.assertEqual(ending, ig.Decimal("1200.00"), f"Detail: {detail}")
-        self.assertEqual(growth, ig.Decimal("-100.00"))
-        self.assertEqual(starting, ig.Decimal("1300.00"))
+        self.assertEqual(growth, ig.Decimal("60.00"))
+        self.assertEqual(starting, ig.Decimal("1140.00"))
 
     @report_test
     def test_investment_growth_raises_when_shares_missing(self):

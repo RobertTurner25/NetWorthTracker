@@ -1,27 +1,27 @@
 {
   "ETH": {
     "currency": "USD",
-    "current": 2289.60595703125,
+    "current": 2306.984130859375,
     "previous_close": 2344.30224609375,
     "source": "yfinance-fast",
     "symbol": "ETH",
-    "timestamp": "2026-02-03T03:11:06.398917Z"
+    "timestamp": "2026-02-03T03:28:22.497220Z"
   },
   "ETH-USD": {
     "currency": "USD",
-    "current": 2289.60595703125,
+    "current": 2306.984130859375,
     "previous_close": 2344.30224609375,
     "source": "yfinance-fast",
     "symbol": "ETH-USD",
-    "timestamp": "2026-02-03T03:11:06.398917Z"
+    "timestamp": "2026-02-03T03:28:22.497220Z"
   },
   "ETHUSD": {
     "currency": "USD",
-    "current": 2289.60595703125,
+    "current": 2306.984130859375,
     "previous_close": 2344.30224609375,
     "source": "yfinance-fast",
     "symbol": "ETHUSD",
-    "timestamp": "2026-02-03T03:11:06.398917Z"
+    "timestamp": "2026-02-03T03:28:22.497220Z"
   },
   "QQQ": {
     "currency": "USD",
@@ -45,7 +45,7 @@
     "previous_close": 637.5401000976562,
     "source": "yfinance-fast",
     "symbol": "VOO",
-    "timestamp": "2026-02-03T03:11:06.999511Z"
+    "timestamp": "2026-02-03T03:28:23.485077Z"
   },
   "VOO-USD": {
     "currency": "USD",
@@ -53,6 +53,6 @@
     "previous_close": 637.5401000976562,
     "source": "yfinance-fast",
     "symbol": "VOO-USD",
-    "timestamp": "2026-02-03T03:11:06.999511Z"
+    "timestamp": "2026-02-03T03:28:23.485077Z"
   }
 }
