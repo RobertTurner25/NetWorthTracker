@@ -21,7 +21,16 @@ A Python tool that pulls live market data for the holdings in `Investments Sprea
 
 ## Requirements
 - Python 3.10+
-- Packages: `streamlit`, `yfinance`, `pandas`, `numpy` (install with `python3 -m pip install --user streamlit yfinance pandas numpy`).
+- Packages: `streamlit`, `yfinance`, `pandas`, `numpy`
+
+Install dependencies from the repository root:
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+Windows note:
+- This repo includes `python3.cmd` so `python3 ...` works in Command Prompt from this folder by forwarding to `.venv\Scripts\python.exe`.
+- If `.venv` is missing, create it first (`python -m venv .venv`) and reinstall requirements.
 
 ## Usage
 ```bash
@@ -37,7 +46,7 @@ Add `--debug` for verbose logging when troubleshooting network requests or cache
 Run the app locally with:
 ```bash
 cd investment_growth_suite
-streamlit run investment_growth.py
+python3 -m streamlit run investment_growth.py
 ```
 The UI lets you edit the spreadsheet, add new accounts, compute daily growth, and view charts.
 

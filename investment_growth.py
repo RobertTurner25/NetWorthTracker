@@ -208,6 +208,45 @@ def parse_shares(raw: str) -> Tuple[Dict[str, Decimal], Optional[Decimal]]:
     return share_map, default_quantity
 
 
+def parse_share_prices(raw: str) -> Tuple[Dict[str, Decimal], Optional[Decimal]]:
+    """
+    Parse the Share Price column. Supports either:
+    * Symbol-qualified values (e.g., "VOO:520;ETH-USD:2400")
+    * A single numeric value (used when there is only one holding)
+    """
+    price_map: Dict[str, Decimal] = {}
+    default_price: Optional[Decimal] = None
+    if not raw:
+        return price_map, default_price
+
+    raw = raw.strip()
+    if not raw:
+        return price_map, default_price
+
+    if re.search(r"[A-Za-z]", raw):
+        tokens = re.split(r"[;|+]+", raw)
+        for token in tokens:
+            token = token.strip()
+            if not token:
+                continue
+            symbol = ""
+            value = ""
+            for splitter in (":", "=", " "):
+                if splitter in token:
+                    left, right = token.split(splitter, 1)
+                    symbol = left.strip().upper()
+                    value = right.strip()
+                    break
+            if not symbol or not value:
+                continue
+            cleaned = value.replace("$", "").replace(",", "")
+            price_map[symbol] = Decimal(cleaned)
+    else:
+        cleaned = raw.replace("$", "").replace(",", "")
+        default_price = Decimal(cleaned)
+    return price_map, default_price
+
+
 @dataclass
 class Quote:
     symbol: str
@@ -642,6 +681,7 @@ def savings_growth(balance: Decimal, apy_raw: str) -> Tuple[Decimal, Decimal, st
 def investment_growth(
     holdings_raw: str,
     shares_raw: str,
+    share_price_raw: str,
     fetcher: PriceFetcher,
     previous_positions: Optional[Dict[str, Tuple[Decimal, Decimal]]],
     account_name: str,
@@ -651,14 +691,13 @@ def investment_growth(
         raise RuntimeError("Holdings missing; cannot determine investment balance.")
 
     share_map, default_share = parse_shares(shares_raw)
+    share_price_map, default_share_price = parse_share_prices(share_price_raw)
 
     total_value = Decimal("0")
     detail_lines: List[str] = []
     current_positions: Dict[str, Tuple[Decimal, Decimal]] = {}
 
     for symbol, quantity in holdings:
-        quote = fetcher.get_quote(symbol)
-
         if quantity is None:
             if symbol in share_map:
                 quantity = share_map[symbol]
@@ -669,13 +708,29 @@ def investment_growth(
                     f"No share count provided for {symbol} in account {account_name}."
                 )
 
-        position_value = (quantity * quote.current).quantize(
+        manual_price: Optional[Decimal] = None
+        if symbol in share_price_map:
+            manual_price = share_price_map[symbol]
+        elif default_share_price is not None and len(holdings) == 1:
+            manual_price = default_share_price
+
+        if manual_price is not None:
+            current_price = manual_price
+            price_source = "manual-share-price"
+            price_ts = "user-input"
+        else:
+            quote = fetcher.get_quote(symbol)
+            current_price = quote.current
+            price_source = quote.source
+            price_ts = quote.timestamp
+
+        position_value = (quantity * current_price).quantize(
             TWO_PLACES, rounding=ROUND_HALF_UP
         )
         total_value += position_value
-        current_positions[symbol] = (quantity, quote.current)
+        current_positions[symbol] = (quantity, current_price)
         detail_lines.append(
-            f"{symbol}: {quantity:.6f} shares @ {quote.current} ({quote.source}, {quote.timestamp})"
+            f"{symbol}: {quantity:.6f} shares @ {current_price} ({price_source}, {price_ts})"
         )
 
     ending = total_value
@@ -736,6 +791,7 @@ def generate_summaries(
         apy = row.get("APY") or row.get("Rate") or row.get("Interest Rate")
         holdings = row.get("Holdings") or row.get("Ticker") or row.get("Holdings/Ticker") or ""
         shares = row.get("Shares") or row.get("Share Count") or row.get("Quantity") or ""
+        share_price = row.get("Share Price") or ""
 
         if all(not (value and value.strip()) for value in row.values()):
             continue
@@ -750,7 +806,7 @@ def generate_summaries(
             elif category == "investments":
                 prior_positions = balance_cache.get_positions(name)
                 growth, ending, detail, starting_balance, positions = investment_growth(
-                    holdings, shares, fetcher, prior_positions, name
+                    holdings, shares, share_price, fetcher, prior_positions, name
                 )
                 balance_cache.set_positions(name, positions)
                 share_prices = "; ".join(
@@ -873,19 +929,103 @@ def run_streamlit_app() -> int:
             df[col] = ""
     df = df[ordered_columns]
 
-    if "sheet_df" not in st.session_state:
-        st.session_state["sheet_df"] = df
+    sheet_state_key = str(sheet_path)
+    if (
+        "sheet_df" not in st.session_state
+        or st.session_state.get("sheet_df_source") != sheet_state_key
+    ):
+        st.session_state["sheet_df"] = df.copy()
+        st.session_state["sheet_df_source"] = sheet_state_key
+        st.session_state["pending_delete_account_index"] = None
+    if "show_add_account_form" not in st.session_state:
+        st.session_state["show_add_account_form"] = False
+    if "open_edit_account_index" not in st.session_state:
+        st.session_state["open_edit_account_index"] = None
+    if "pending_delete_account_index" not in st.session_state:
+        st.session_state["pending_delete_account_index"] = None
+    if "suppress_next_edit_toggle" not in st.session_state:
+        st.session_state["suppress_next_edit_toggle"] = False
 
-    edited_df = st.data_editor(
-        st.session_state["sheet_df"],
-        num_rows="dynamic",
-        use_container_width=True,
-        key="sheet_editor",
+    def persist_sheet_state() -> None:
+        rows_to_save = rows_from_dataframe(
+            st.session_state["sheet_df"], list(st.session_state["sheet_df"].columns)
+        )
+        save_sheet(
+            sheet_path,
+            rows_to_save,
+            list(st.session_state["sheet_df"].columns),
+        )
+
+    def clear_pending_delete() -> None:
+        st.session_state["pending_delete_account_index"] = None
+
+    def confirm_pending_delete() -> None:
+        pending_idx = st.session_state.get("pending_delete_account_index")
+        if pending_idx is None:
+            return
+        if pending_idx < 0 or pending_idx >= len(st.session_state["sheet_df"]):
+            st.session_state["pending_delete_account_index"] = None
+            return
+        pending_name = str(
+            st.session_state["sheet_df"].iloc[pending_idx].get("Account Name", "")
+        ).strip() or "Unnamed account"
+        st.session_state["sheet_df"] = st.session_state["sheet_df"].drop(
+            index=pending_idx
+        ).reset_index(drop=True)
+        st.session_state["pending_delete_account_index"] = None
+        st.session_state["open_edit_account_index"] = None
+        persist_sheet_state()
+        st.session_state["last_action_message"] = f"Deleted account: {pending_name}"
+
+    compute_now = st.button("Refresh growth")
+
+    summaries = st.session_state.get("last_summaries", [])
+    rows_for_calc = rows_from_dataframe(
+        st.session_state["sheet_df"], list(st.session_state["sheet_df"].columns)
     )
+    calc_signature = json.dumps(rows_for_calc, sort_keys=True)
+    should_compute = (
+        compute_now
+        or not summaries
+        or st.session_state.get("last_summary_signature") != calc_signature
+    )
+    if should_compute:
+        fetcher = PriceFetcher(Path(cache_path_text), allow_network=True)
+        balance_cache = BalanceCache(Path(balance_cache_text))
+        summaries = generate_summaries(rows_for_calc, fetcher, balance_cache)
+        balance_cache.persist()
+        st.session_state["last_summaries"] = summaries
+        st.session_state["last_summary_signature"] = calc_signature
 
-    add_expander = st.expander("Add account")
-    with add_expander:
-        with st.form("add_account"):
+    if (
+        summaries
+        and not st.session_state["show_add_account_form"]
+        and st.session_state["pending_delete_account_index"] is None
+    ):
+        total_start = sum(s.starting_balance for s in summaries)
+        total_growth = sum(s.growth for s in summaries)
+        total_end = sum(s.ending_balance for s in summaries)
+        top1, top2, top3 = st.columns(3)
+        top1.metric("Current Net Worth", format_currency(total_end))
+        top2.metric("Daily Growth", format_currency(total_growth))
+        top3.metric("Starting Net Worth", format_currency(total_start))
+
+    summary_queues: Dict[str, List[AccountSummary]] = {}
+    for summary in summaries:
+        summary_key = str(summary.name).strip()
+        summary_queues.setdefault(summary_key, []).append(summary)
+
+    header_col, add_col = st.columns([8, 1])
+    with header_col:
+        st.subheader("Accounts")
+    with add_col:
+        if st.button("➕", key="add_account_toggle", help="Add account"):
+            st.session_state["show_add_account_form"] = not st.session_state["show_add_account_form"]
+            st.rerun()
+
+    if st.session_state["show_add_account_form"]:
+        with st.form("add_account", clear_on_submit=True):
+            st.markdown("**Add account**")
             new_account = st.text_input("Account Name")
             new_category = st.text_input("Category", value="Investments")
             new_institution = st.text_input("Institution")
@@ -896,50 +1036,162 @@ def run_streamlit_app() -> int:
             submitted = st.form_submit_button("Add")
 
         if submitted:
-            new_row = {
-                "Account Name": new_account,
-                "Category": new_category,
-                "Institution": new_institution,
-                "Balance": new_balance,
-                "Holdings": new_holdings,
-                "APY": new_apy,
-                "Shares": new_shares,
-            }
-            updated_df = pd.concat([edited_df, pd.DataFrame([new_row])], ignore_index=True)
+            new_row = {column: "" for column in ordered_columns}
+            new_row.update(
+                {
+                    "Account Name": new_account,
+                    "Category": new_category,
+                    "Institution": new_institution,
+                    "Balance": new_balance,
+                    "Holdings": new_holdings,
+                    "APY": new_apy,
+                    "Shares": new_shares,
+                }
+            )
+            updated_df = pd.concat(
+                [st.session_state["sheet_df"], pd.DataFrame([new_row])],
+                ignore_index=True,
+            )
             st.session_state["sheet_df"] = updated_df
+            persist_sheet_state()
+            st.session_state["show_add_account_form"] = False
+            st.session_state["open_edit_account_index"] = None
+            st.session_state["pending_delete_account_index"] = None
+            st.session_state["last_action_message"] = (
+                f"Added account: {new_account.strip() or 'Unnamed account'}"
+            )
             st.rerun()
 
-    col_save, col_compute = st.columns(2)
-    with col_save:
-        if st.button("Save changes", type="primary"):
-            rows_to_save = rows_from_dataframe(edited_df, list(edited_df.columns))
-            save_sheet(sheet_path, rows_to_save, list(edited_df.columns))
-            st.success("Spreadsheet saved.")
+    pending_delete_index = st.session_state.get("pending_delete_account_index")
+    if pending_delete_index is not None:
+        if pending_delete_index < 0 or pending_delete_index >= len(st.session_state["sheet_df"]):
+            st.session_state["pending_delete_account_index"] = None
+        else:
+            pending_name = str(
+                st.session_state["sheet_df"].iloc[pending_delete_index].get("Account Name", "")
+            ).strip() or "Unnamed account"
+            with st.container(border=True):
+                st.error(f"Delete `{pending_name}`? This cannot be undone.")
+                confirm_col, cancel_col = st.columns(2)
+                with confirm_col:
+                    st.button(
+                        "Confirm Delete",
+                        type="primary",
+                        key=f"confirm_delete_{pending_delete_index}",
+                        on_click=confirm_pending_delete,
+                    )
+                with cancel_col:
+                    st.button(
+                        "Cancel",
+                        key=f"cancel_delete_{pending_delete_index}",
+                        on_click=clear_pending_delete,
+                    )
 
-    with col_compute:
-        compute_now = st.button("Compute growth")
+    if st.session_state["sheet_df"].empty:
+        st.info("No accounts yet. Click the plus button to add one.")
+    else:
+        rows_snapshot = list(st.session_state["sheet_df"].reset_index(drop=True).iterrows())
+        for idx, row in rows_snapshot:
+            account_name = str(row.get("Account Name", "")).strip() or "Unnamed account"
+            category = str(row.get("Category", "")).strip() or "Uncategorized"
+            category_kind = classify_category(category)
+            institution = str(row.get("Institution", "")).strip() or "-"
+            balance_display = coerce_cell(row.get("Balance", "")) or "-"
+            holdings_display = coerce_cell(row.get("Holdings", "")) or "-"
+            apy_display = coerce_cell(row.get("APY", "")) or "-"
+            shares_display = coerce_cell(row.get("Shares", "")) or "-"
+            matched_summary = None
+            queue_key = str(row.get("Account Name", "")).strip()
+            if queue_key in summary_queues and summary_queues[queue_key]:
+                matched_summary = summary_queues[queue_key].pop(0)
+            if category_kind == "investments" and matched_summary is not None:
+                balance_display = format_currency(matched_summary.ending_balance)
 
-    summaries = st.session_state.get("last_summaries", [])
-    fetcher = PriceFetcher(Path(cache_path_text), allow_network=True)
-    balance_cache = BalanceCache(Path(balance_cache_text))
-    rows_for_calc = rows_from_dataframe(edited_df, list(edited_df.columns))
-    summaries = generate_summaries(rows_for_calc, fetcher, balance_cache)
-    balance_cache.persist()
-    st.session_state["last_summaries"] = summaries
+            with st.container(border=True):
+                left_col, edit_col, delete_col = st.columns([10, 1, 1])
+                with left_col:
+                    st.markdown(f"**{account_name}**")
+                    st.caption(f"{category} | {institution}")
+                    detail_parts = [f"Balance: `{balance_display}`"]
+                    if category_kind == "investments":
+                        detail_parts.append(f"Holdings: `{holdings_display}`")
+                        detail_parts.append(f"Shares: `{shares_display}`")
+                    elif category_kind == "savings":
+                        detail_parts.append(f"APY: `{apy_display}`")
+                    else:
+                        detail_parts.append(f"Holdings: `{holdings_display}`")
+                        detail_parts.append(f"APY: `{apy_display}`")
+                    st.markdown("  |  ".join(detail_parts))
+                with edit_col:
+                    edit_clicked = st.button("✏️", key=f"edit_toggle_{idx}", help="Edit account")
+                with delete_col:
+                    delete_clicked = st.button("🗑️", key=f"delete_account_{idx}", help="Delete account")
+
+                if edit_clicked:
+                    if st.session_state["suppress_next_edit_toggle"]:
+                        st.session_state["suppress_next_edit_toggle"] = False
+                    else:
+                        if st.session_state["open_edit_account_index"] == idx:
+                            st.session_state["open_edit_account_index"] = None
+                        else:
+                            st.session_state["open_edit_account_index"] = idx
+                    st.session_state["pending_delete_account_index"] = None
+                    st.rerun()
+
+                if delete_clicked:
+                    st.session_state["pending_delete_account_index"] = idx
+                    st.session_state["open_edit_account_index"] = None
+                    st.rerun()
+
+                if st.session_state["open_edit_account_index"] == idx:
+                    st.markdown("**Edit account**")
+                    with st.form(f"edit_account_form_{idx}", clear_on_submit=False):
+                        edited_values = {}
+                        for col in ordered_columns:
+                            edited_values[col] = st.text_input(
+                                col,
+                                value=coerce_cell(row.get(col, "")),
+                            )
+                        save_col, cancel_col = st.columns(2)
+                        with save_col:
+                            update_clicked = st.form_submit_button("Save Changes", type="primary")
+                        with cancel_col:
+                            cancel_edit_clicked = st.form_submit_button("Cancel")
+
+                    if cancel_edit_clicked:
+                        st.session_state["open_edit_account_index"] = None
+                        st.session_state["pending_delete_account_index"] = None
+                        st.session_state["suppress_next_edit_toggle"] = True
+                        st.rerun()
+
+                    if update_clicked:
+                        for col in ordered_columns:
+                            st.session_state["sheet_df"].at[idx, col] = edited_values[col]
+                        persist_sheet_state()
+                        st.session_state["open_edit_account_index"] = None
+                        st.session_state["pending_delete_account_index"] = None
+                        st.session_state["suppress_next_edit_toggle"] = True
+                        st.session_state["last_action_message"] = (
+                            f"Updated account: {edited_values.get('Account Name', account_name)}"
+                        )
+                        st.rerun()
+
+    action_message = st.session_state.pop("last_action_message", "")
+    if action_message:
+        st.success(action_message)
 
     if not summaries:
-        st.warning("No summaries available. Add accounts and compute growth.")
+        st.info("No summaries available yet.")
         return 0
 
-    if "Share Price" in edited_df.columns:
+    if compute_now and "Share Price" in st.session_state["sheet_df"].columns:
         share_price_map = {summary.name: summary.share_prices for summary in summaries}
-        updated_df = edited_df.copy()
+        updated_df = st.session_state["sheet_df"].copy()
         for idx, row in updated_df.iterrows():
             account_name = str(row.get("Account Name", "")).strip()
             if account_name and account_name in share_price_map:
                 updated_df.at[idx, "Share Price"] = share_price_map[account_name]
         st.session_state["sheet_df"] = updated_df
-        edited_df = updated_df
 
     summary_data = [
         {
@@ -955,15 +1207,6 @@ def run_streamlit_app() -> int:
         for summary in summaries
     ]
     summary_df = pd.DataFrame(summary_data)
-
-    total_start = sum(s.starting_balance for s in summaries)
-    total_growth = sum(s.growth for s in summaries)
-    total_end = sum(s.ending_balance for s in summaries)
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Starting Net Worth", format_currency(total_start))
-    col2.metric("Daily Growth", format_currency(total_growth))
-    col3.metric("Ending Net Worth", format_currency(total_end))
 
     st.subheader("Daily Growth by Account")
     chart_df = summary_df[["Account", "Daily Growth"]].set_index("Account")

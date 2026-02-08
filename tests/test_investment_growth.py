@@ -83,7 +83,7 @@ class InvestmentGrowthTests(unittest.TestCase):
             "ETH-USD": (ig.Decimal("0.5"), ig.Decimal("1900")),
         }
         growth, ending, detail, starting, _positions = ig.investment_growth(
-            holdings, shares, fetcher, prior_positions, "My Account"
+            holdings, shares, "", fetcher, prior_positions, "My Account"
         )
         self.assertEqual(ending, ig.Decimal("1200.00"), f"Detail: {detail}")
         self.assertEqual(growth, ig.Decimal("60.00"))
@@ -93,7 +93,16 @@ class InvestmentGrowthTests(unittest.TestCase):
     def test_investment_growth_raises_when_shares_missing(self):
         fetcher = DummyFetcher({"VOO": {"current": "100"}})
         with self.assertRaises(RuntimeError):
-            ig.investment_growth("VOO", "", fetcher, None, "Test")
+            ig.investment_growth("VOO", "", "", fetcher, None, "Test")
+
+    @report_test
+    def test_investment_growth_uses_manual_share_price(self):
+        fetcher = DummyFetcher({"VOO": {"current": "100"}})
+        growth, ending, _detail, _starting, _positions = ig.investment_growth(
+            "VOO", "2", "125", fetcher, None, "Manual Price Account"
+        )
+        self.assertEqual(ending, ig.Decimal("250.00"))
+        self.assertEqual(growth, ig.Decimal("0"))
 
     @report_test
     def test_balance_cache_roundtrip(self):
